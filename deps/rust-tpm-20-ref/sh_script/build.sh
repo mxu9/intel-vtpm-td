@@ -24,6 +24,7 @@ function clean() {
 function build() {
     pushd smallc
     CC=clang AR=llvm-ar make
+    make install
     popd
 
     pushd openssl-stubs
