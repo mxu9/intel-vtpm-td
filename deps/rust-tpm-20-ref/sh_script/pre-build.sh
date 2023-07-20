@@ -11,4 +11,12 @@ patch_mstpm20ref() {
     popd
 }
 
+patch_musl() {
+    pushd smallc/musl
+    git reset --hard f5f55d65
+    git clean -f -d
+    popd
+}
+
 patch_mstpm20ref
+patch_musl
