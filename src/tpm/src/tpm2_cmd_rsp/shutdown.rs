@@ -24,7 +24,7 @@ pub fn tpm2_shutdown() -> VtpmResult {
 
     let rsp = rsp.unwrap();
     if rsp.response_code != TPM_RC_SUCCESS {
-        log::error!("Tpm2PcrExtend failed.\n");
+        // log::error!("Tpm2PcrExtend failed.\n");
         return Err(VtpmError::TpmLibError);
     }
 

@@ -28,3 +28,7 @@ pub const TPM_SHUTDOWN_CMD: [u8; 12] = [
 
 /// TPM PcrExtend
 pub const TPM_CC_PCR_EXTEND: u32 = 0x182;
+
+pub const TPM2_CC_CREATEPRIMARY: u32 = 0x00000131;
+pub const TPM2_CC_NV_DEFINESPACE: u32 = 0x0000012a;
+pub const TPM2_CC_NV_WRITE: u32 = 0x00000137;

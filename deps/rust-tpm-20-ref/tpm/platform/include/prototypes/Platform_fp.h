@@ -547,4 +547,9 @@ _plat__TPM_Initialize(
     void            *platParameter
 );
 
+LIB_EXPORT int
+_plat__TPMT_PUBLIC_Size (
+    void
+);
+
 #endif  // _PLATFORM_FP_H_

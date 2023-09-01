@@ -53,6 +53,8 @@
 // #include <setjmp.h>
 #include "ExecCommand_fp.h"
 #include "Manufacture_fp.h"
+#include "Tpm.h"
+#include "TpmTypes.h"
 
 // jmp_buf              s_jumpBuffer;
 
@@ -120,3 +122,10 @@ _plat__TPM_Initialize(
     return 0;
 }
 
+LIB_EXPORT int
+_plat__TPMT_PUBLIC_Size (
+    void
+)
+{
+    return sizeof (TPMT_PUBLIC);
+}

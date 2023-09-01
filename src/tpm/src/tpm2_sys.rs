@@ -14,6 +14,10 @@ extern "C" {
 }
 
 extern "C" {
+    pub fn _plat__TPMT_PUBLIC_Size() -> crate::cty::c_int;
+}
+
+extern "C" {
     pub fn _plat__TPM_Initialize(
         firstTime: crate::cty::c_int,
         platParameter: *mut crate::cty::c_void,

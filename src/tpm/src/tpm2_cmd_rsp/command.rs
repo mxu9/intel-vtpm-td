@@ -32,7 +32,7 @@ impl Tpm2CommandHeader {
         }
 
         let tag = u16::from_be_bytes([bytes[0], bytes[1]]);
-        let param_size = u32::from_be_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+        let param_size = u32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
         let command_code = u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]);
 
         Some(Tpm2CommandHeader {
@@ -58,4 +58,13 @@ impl Tpm2CommandHeader {
 
         Some(TPM2_COMMAND_HEADER_SIZE)
     }
+
+    pub fn set_size(&mut self, size: u32) {
+        self.param_size = size;
+    }
+
+    pub fn size() -> u32 {
+        TPM2_COMMAND_HEADER_SIZE as u32
+    }
+
 }
