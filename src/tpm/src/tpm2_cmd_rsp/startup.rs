@@ -24,7 +24,7 @@ pub fn tpm2_startup() -> VtpmResult {
 
     let rsp = rsp.unwrap();
     if rsp.response_code != TPM_RC_SUCCESS {
-        log::error!("Tpm2PcrExtend failed.\n");
+        log::error!("tpm2_startup failed with rsp_code {:?}\n", rsp.response_code);
         return Err(VtpmError::TpmLibError);
     }
 

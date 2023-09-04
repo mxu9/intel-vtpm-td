@@ -12,18 +12,9 @@ use crate::resolve::{EXTENDED_KEY_USAGE, EXTNID_VTPMTD_QUOTE, EXTNID_VTPMTD_EVEN
 use crate::x509::{self, Extension};
 use crate::{resolve::{generate_ecdsa_keypairs, ResolveError, ID_EC_PUBKEY_OID, SECP384R1_OID, VTPMTD_EXTENDED_KEY_USAGE}, x509::{AlgorithmIdentifier, X509Error}};
 
-fn generate_td_quote(public_key: &[u8]) -> Result<alloc::vec::Vec<u8>, ResolveError> {
-    let public_key_hash = digest::digest(&digest::SHA384, public_key);
+pub fn generate_ek_cert (td_quote: &[u8], event_log: &[u8]) -> Result<alloc::vec::Vec<u8>, ResolveError> {
 
-    // Generate the TD Report that contains the public key hash as nonce
-    let mut td_report_data = [0u8; 64];
-    td_report_data[..public_key_hash.as_ref().len()].copy_from_slice(public_key_hash.as_ref());
-    let td_report = tdx_tdcall::tdreport::tdcall_report(&td_report_data)
-        .map_err(|_| ResolveError::GetTdQuote)?;
-    Ok(td_report.as_bytes().to_vec())
-}
-
-pub fn generate_ek_cert (ek_pub: &[u8]) -> Result<alloc::vec::Vec<u8>, ResolveError> {
+    log::info!(">>td_quote = {0:#x} bytes, event_log = {1:#x} bytes\n", td_quote.len(), event_log.len());
 
     let mut pkcs8 = generate_ecdsa_keypairs().expect("Failed to generate ecdsa keypair.\n");
     let mut key_pair = ring::signature::EcdsaKeyPair::from_pkcs8(
@@ -36,18 +27,12 @@ pub fn generate_ek_cert (ek_pub: &[u8]) -> Result<alloc::vec::Vec<u8>, ResolveEr
     }
     let mut key_pair = key_pair.unwrap();
 
-    // TODO get event_log
-    let event_log: [u8; 256] = [0; 256];
-
     let mut sig_buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let signer = |data: &[u8], sig_buf: &mut alloc::vec::Vec<u8>| {
         let rand = SystemRandom::new();
         let signature = key_pair.sign(&rand, data).unwrap();
         sig_buf.extend_from_slice(signature.as_ref());
     };
-
-    // generate td_quote
-    let td_quote = generate_td_quote(ek_pub)?;
 
     // Generate x.509 certificate
     let algorithm = AlgorithmIdentifier {
@@ -72,12 +57,12 @@ pub fn generate_ek_cert (ek_pub: &[u8]) -> Result<alloc::vec::Vec<u8>, ResolveEr
             .add_extension(Extension::new(
                 EXTNID_VTPMTD_QUOTE,
                 Some(false),
-                Some(td_quote.as_slice()),
+                Some(td_quote),
             )?)?
             .add_extension(Extension::new(
                 EXTNID_VTPMTD_EVENT_LOG,
                 Some(false),
-                Some(&event_log),
+                Some(event_log),
             )?)?
             .sign(&mut sig_buf, signer)?
             .build();
