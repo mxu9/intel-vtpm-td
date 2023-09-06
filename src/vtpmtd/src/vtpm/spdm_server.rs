@@ -25,7 +25,6 @@ use spdmlib::crypto::dhe::generate_key_pair;
 use spdmlib::crypto::{cert_operation, SpdmCertOperation};
 use spdmlib::error::{SpdmStatus, SPDM_STATUS_INVALID_CERT};
 use spdmlib::protocol::SpdmVersion;
-use tpm::execute_command;
 use x86::halt;
 
 use super::spdm_connection::SpdmConnection;

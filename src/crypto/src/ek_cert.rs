@@ -16,8 +16,8 @@ pub fn generate_ek_cert (td_quote: &[u8], event_log: &[u8]) -> Result<alloc::vec
 
     log::info!(">>td_quote = {0:#x} bytes, event_log = {1:#x} bytes\n", td_quote.len(), event_log.len());
 
-    let mut pkcs8 = generate_ecdsa_keypairs().expect("Failed to generate ecdsa keypair.\n");
-    let mut key_pair = ring::signature::EcdsaKeyPair::from_pkcs8(
+    let pkcs8 = generate_ecdsa_keypairs().expect("Failed to generate ecdsa keypair.\n");
+    let key_pair = ring::signature::EcdsaKeyPair::from_pkcs8(
         &ring::signature::ECDSA_P384_SHA384_ASN1_SIGNING,
         pkcs8.as_ref(),
     );
