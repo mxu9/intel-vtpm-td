@@ -3,12 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use attestation::get_quote;
-use crypto::{ek_cert::generate_ek_cert, resolve::ResolveError};
+use crypto::{ek_cert::generate_ek_cert_chain, resolve::{ResolveError, generate_ecdsa_keypairs}};
 use eventlog::eventlog::{get_event_log, event_log_size};
 use global::{VtpmResult, VtpmError, VTPM_MAX_BUFFER_SIZE};
 use crate::{execute_command, tpm2_cmd_rsp::{startup::tpm2_startup, command::Tpm2CommandHeader, TPM_ST_SESSIONS, TPM2_CC_CREATEPRIMARY, shutdown::tpm2_shutdown, TPM2_COMMAND_HEADER_SIZE, TPM2_CC_NV_DEFINESPACE, TPM2_CC_NV_WRITE, TPM_RC_SUCCESS, TPM2_CC_EVICTCONTROL}, tpm2_sys::_plat__TPMT_PUBLIC_Size};
 use alloc::{vec::Vec, slice};
-use ring::digest;
+use ring::{digest, signature::{KeyPair, EcdsaKeyPair}};
 
 const TPM2_EK_ECC_SECP384R1_HANDLE: u32 = 0x81010016;
 const TPM2_ALG_AES: u16 = 0x0006;
@@ -250,13 +250,13 @@ pub fn tpm2_get_ek_pub() -> Vec<u8> {
     out_public.to_vec()
 }
 
-fn get_td_quote(ek_pub: &[u8]) -> Result<Vec<u8>, VtpmError> {
+fn get_td_quote(data: &[u8]) -> Result<Vec<u8>, VtpmError> {
     // first calc the hash of ek_pub
-    let ek_pub_hash = digest::digest(&digest::SHA384, ek_pub);
+    let data_hash = digest::digest(&digest::SHA384, data);
 
     // Generate the TD Report that contains the ek_pub hash as nonce
     let mut td_report_data = [0u8; 64];
-    td_report_data[..ek_pub_hash.as_ref().len()].copy_from_slice(ek_pub_hash.as_ref());
+    td_report_data[..data_hash.as_ref().len()].copy_from_slice(data_hash.as_ref());
     let td_report = tdx_tdcall::tdreport::tdcall_report(&td_report_data)
         .map_err(|_| ResolveError::GetTdReport);
     if td_report.is_err() {
@@ -352,7 +352,7 @@ fn tpm2_nv_write(nvindex: u32, offset: u16, data: &[u8]) -> VtpmResult {
     let mut hdr: Tpm2CommandHeader = Tpm2CommandHeader::new(TPM_ST_SESSIONS, 0, TPM2_CC_NV_WRITE);
     let authblock: Tpm2AuthBlock = Tpm2AuthBlock::new(TPM2_RS_PW, 0, 0, 0);
 
-    let mut nv_req: Vec<u8> = Vec::with_capacity(4096);
+    let mut nv_req: Vec<u8> = Vec::with_capacity(VTPM_MAX_BUFFER_SIZE);
     nv_req.extend_from_slice(hdr.as_slice());
     nv_req.extend_from_slice(&TPM2_RH_PLATFORM.to_be_bytes());
     nv_req.extend_from_slice(&nvindex.to_be_bytes());
@@ -370,12 +370,32 @@ fn tpm2_nv_write(nvindex: u32, offset: u16, data: &[u8]) -> VtpmResult {
     let mut rsp: [u8; VTPM_MAX_BUFFER_SIZE] = [0; VTPM_MAX_BUFFER_SIZE];
     let (rsp_size, rsp_code) = execute_command(nv_req.as_slice(), &mut rsp, 0);
 
-    if rsp_size == 0 || rsp_code == TPM_RC_SUCCESS {
+    if rsp_size == 0 || rsp_code != TPM_RC_SUCCESS {
         log::error!("Failed of tpm2_nv_write. code = {:#x}\n", rsp_code);
         return Err(VtpmError::TpmLibError);
     }
 
     Ok(())
+}
+
+fn create_ecdsa_keypairs() -> Option<EcdsaKeyPair> {
+
+    let pkcs8 = generate_ecdsa_keypairs();
+    if pkcs8.is_none() {
+        log::error!("Failed to generate pkcs8.\n");
+        return None;
+    }
+
+    let key_pair = ring::signature::EcdsaKeyPair::from_pkcs8(
+        &ring::signature::ECDSA_P384_SHA384_ASN1_SIGNING,
+        pkcs8.unwrap().as_ref(),
+    );
+
+    if key_pair.is_err() {
+        log::error!("Failed to generate ecdsa keypair from pkcs8.\n");
+        return None;
+    }
+    Some(key_pair.unwrap())
 }
 
 pub fn tpm2_provision_ek() -> VtpmResult {
@@ -401,8 +421,15 @@ pub fn tpm2_provision_ek() -> VtpmResult {
             break;
         }
 
+        // create ecdsa_keypair for ca-cert
+        let key_pair = create_ecdsa_keypairs();
+        if key_pair.is_none() {
+            break;
+        }
+        let key_pair = key_pair.unwrap();
+    
         // get td_quote
-        let td_quote = get_td_quote(&ek_pub.as_slice());
+        let td_quote = get_td_quote(key_pair.public_key().as_ref());
         if td_quote.is_err() {
             break;
         }
@@ -417,15 +444,15 @@ pub fn tpm2_provision_ek() -> VtpmResult {
         let size = size.unwrap();
         let event_log = &event_log[..size + 1];
 
-        // generate ek_cert with td_quote and event_log
-        let ek_cert = generate_ek_cert (td_quote.as_slice(), event_log);
-        if ek_cert.is_err() {
+        // generate ek_cert_chain
+        let ek_cert_chain = generate_ek_cert_chain (td_quote.as_slice(), event_log, ek_pub.as_slice(), &key_pair);
+        if ek_cert_chain.is_err() {
             break;
         }
 
         // save it into NV
-        let ek_cert = ek_cert.unwrap();
-        if tpm2_write_cert_nvram(ek_cert.as_slice()).is_err() {
+        let ek_cert_chain = ek_cert_chain.unwrap();
+        if tpm2_write_cert_nvram(ek_cert_chain.as_slice()).is_err() {
             break;
         }
 
