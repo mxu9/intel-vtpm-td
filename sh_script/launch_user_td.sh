@@ -19,7 +19,7 @@ LOGFILE=${LOGDIR}/usertd.${now}.log
 MEM=8G
 TARGET=shell
 GRUB_BOOT=0
-USERTD_ID=aabbccdd-2012-2022-1234-123456789123
+USERTD_ID=aabbccdd-2008-2022-1234-123456789123
 
 usage() {
     cat << EOM
