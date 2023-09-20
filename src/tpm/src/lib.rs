@@ -37,12 +37,12 @@ pub fn execute_command(request: &[u8], response: &mut [u8], _vtpm_id: u128) -> (
     let mut buf: [u8; TPM2_COMMAND_HEADER_SIZE] = [0; TPM2_COMMAND_HEADER_SIZE];
     buf.copy_from_slice(&request[..TPM2_COMMAND_HEADER_SIZE]);
 
-    // log::info!("tpm cmd: {:02x?}\n", request);
+    log::info!("tpm cmd: {:02x?}\n", request);
 
     let tpm_cmd = Tpm2CommandHeader::from_bytes(&buf);
     if let Some(tpm_cmd) = tpm_cmd {
         GLOBAL_TPM_DATA.lock().last_tpm_cmd_code = Some(tpm_cmd.get_command_code());
-        // log::info!(" cmd code: 0x{:x?}\n ", tpm_cmd.get_command_code());
+        log::info!(" cmd code: 0x{:x?}\n ", tpm_cmd.get_command_code());
     } else {
         log::error!("Invalid Tpm2CommandHeader!\n");
         log::error!("  {:02x?}\n", &buf);
@@ -67,7 +67,7 @@ pub fn execute_command(request: &[u8], response: &mut [u8], _vtpm_id: u128) -> (
     if let Some(tpm_rsp) = tpm_rsp {
         rsp_code = tpm_rsp.get_response_code();
         GLOBAL_TPM_DATA.lock().last_tpm_rsp_code = Some(rsp_code);
-        // log::info!("rsp code: {:x?}\n", rsp_code);
+        log::info!("rsp code: {:x?}\n", rsp_code);
     } else {
         log::error!("Invalid Tpm2ResponseHeader!\n");
         log::error!("  {:02x?}\n", &buf);
@@ -75,7 +75,7 @@ pub fn execute_command(request: &[u8], response: &mut [u8], _vtpm_id: u128) -> (
         return (0, 0);
     }
 
-    // log::info!("tpm rsp: {:02x?}\n", &response[..response_size as usize]);
+    log::info!("tpm rsp: {:02x?}\n", &response[..response_size as usize]);
 
     (response_size, rsp_code)
 }

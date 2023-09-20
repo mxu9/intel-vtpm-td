@@ -13,9 +13,17 @@ use crate::{
     },
 };
 use alloc::{slice, vec::Vec};
-use crypto::ek_cert::generate_ek_cert;
+use crypto::{
+    ek_cert::generate_ek_cert,
+    resolve::{ID_EC_PUBKEY_OID, ID_RSA_PUBKEY_OID, SECP384R1_OID},
+    x509::AlgorithmIdentifier,
+};
+use der::{Tag, asn1::{UIntBytes, Any}, Encodable, Sequence};
 use global::{VtpmError, VtpmResult, GLOBAL_TPM_DATA, VTPM_MAX_BUFFER_SIZE};
-use ring::signature;
+use ring::signature::{self, EcdsaKeyPair};
+
+const TPM2_EK_RSA_HANDLE: u32 = 0x81010001;
+const TPM2_ALG_RSA: u16 = 0x0001;
 
 const TPM2_EK_ECC_SECP384R1_HANDLE: u32 = 0x81010016;
 const TPM2_ALG_AES: u16 = 0x0006;
@@ -48,6 +56,8 @@ const TPM_PT_NV_BUFFER_MAX: u32 = 0x12c;
 const TPM2_NV_INDEX_ECC_SECP384R1_HI_EKCERT: u32 = 0x01c00016;
 // Section 2.2.1.5.2
 const TPM2_NV_INDEX_VTPM_CA_CERT_CHAIN: u32 = 0x01c00100;
+
+const TPM2_NV_INDEX_RSA2048_EKCERT: u32 = 0x01c00002;
 
 #[repr(C, packed)]
 struct Tpm2AuthBlock {
@@ -122,6 +132,12 @@ impl Tpm2EvictControlReq {
     fn size() -> u32 {
         core::mem::size_of::<Self>() as u32
     }
+}
+
+#[derive(Clone, Copy, Default, Debug)]
+struct Tpm2Caps {
+    pub max_nv_index_size: u32,
+    pub max_nv_buffer_size: u32,
 }
 
 const TPMA_OBJECT_FIXEDTPM: u32 = 0x00000002;
@@ -216,6 +232,92 @@ fn tpm2_create_ek_ec384() -> VtpmResult {
     tpm2_evictcontrol(curr_handle, tpm2_ek_handle)
 }
 
+///
+/// For ECC follow "TCG EK Credential Profile For TPM Family 2.0; Level 0"
+/// Specification Version 2.3; Revision 2; 23 July 2020
+/// Ek-Template for RSA 2048 follow B.3.3 of above spec.
+///
+fn tpm2_create_ek_rsa2048() -> VtpmResult {
+    let symkeylen: u16 = 128;
+    let authpolicy_len: u16 = 32;
+    let rsa_keysize: u16 = 2048;
+    let tpm2_ek_handle: u32 = TPM2_EK_RSA_HANDLE;
+    let authpolicy: [u8; 32] = [
+        0x83, 0x71, 0x97, 0x67, 0x44, 0x84, 0xb3, 0xf8, 0x1a, 0x90, 0xcc, 0x8d, 0x46, 0xa5, 0xd7,
+        0x24, 0xfd, 0x52, 0xd7, 0x6e, 0x06, 0x52, 0x0b, 0x64, 0xf2, 0xa1, 0xda, 0x1b, 0x33, 0x14,
+        0x69, 0xaa,
+    ];
+
+    let keyflags = TPMA_OBJECT_FIXEDTPM
+        | TPMA_OBJECT_FIXEDPARENT
+        | TPMA_OBJECT_SENSITIVEDATAORIGIN
+        | TPMA_OBJECT_ADMINWITHPOLICY
+        | TPMA_OBJECT_RESTRICTED
+        | TPMA_OBJECT_DECRYPT;
+
+    // symmetric: TPM_ALG_AES, 128bit, TPM_ALG_CFB
+    let symkeydata: &[u8] = &[
+        TPM2_ALG_AES.to_be_bytes(),
+        symkeylen.to_be_bytes(),
+        TPM2_ALG_CFB.to_be_bytes(),
+    ]
+    .concat();
+
+    let authblock: Tpm2AuthBlock = Tpm2AuthBlock::new(TPM2_RS_PW, 0, 0, 0);
+    let mut hdr: Tpm2CommandHeader =
+        Tpm2CommandHeader::new(TPM_ST_SESSIONS, 0, TPM2_CC_CREATEPRIMARY);
+
+    let mut nonce_rsa2048: [u8; 0x102] = [0; 0x102];
+    nonce_rsa2048[0..2].copy_from_slice(&0x100_u16.to_be_bytes());
+
+    let mut public: Vec<u8> = Vec::new();
+    public.extend_from_slice(&TPM2_ALG_RSA.to_be_bytes());
+    public.extend_from_slice(&TPM2_ALG_SHA256.to_be_bytes());
+    public.extend_from_slice(&keyflags.to_be_bytes());
+    public.extend_from_slice(&authpolicy_len.to_be_bytes());
+    public.extend_from_slice(&authpolicy);
+    public.extend_from_slice(symkeydata);
+    public.extend_from_slice(&TPM2_ALG_NULL.to_be_bytes());
+    public.extend_from_slice(&rsa_keysize.to_be_bytes());
+    public.extend_from_slice(&0_u32.to_be_bytes());
+    public.extend_from_slice(&nonce_rsa2048);
+
+    let mut create_primary_req: Vec<u8> = Vec::new();
+    create_primary_req.extend_from_slice(hdr.as_slice());
+    create_primary_req.extend_from_slice(&TPM2_RH_ENDORSEMENT.to_be_bytes());
+    create_primary_req.extend_from_slice(&Tpm2AuthBlock::size().to_be_bytes());
+    create_primary_req.extend_from_slice(authblock.as_slice());
+    create_primary_req.extend_from_slice(&4_u16.to_be_bytes());
+    create_primary_req.extend_from_slice(&0_u32.to_be_bytes());
+    create_primary_req.extend_from_slice(&(public.len() as u16).to_be_bytes());
+    create_primary_req.extend_from_slice(public.as_slice());
+    create_primary_req.extend_from_slice(&0_u32.to_be_bytes());
+    create_primary_req.extend_from_slice(&0_u16.to_be_bytes());
+
+    let final_req_len = create_primary_req.len() as u32;
+    let (left_hdr, _) = create_primary_req.split_at_mut(TPM2_COMMAND_HEADER_SIZE);
+    hdr.set_size(final_req_len);
+    left_hdr.copy_from_slice(hdr.as_slice());
+
+    let mut rsp: [u8; VTPM_MAX_BUFFER_SIZE] = [0; VTPM_MAX_BUFFER_SIZE];
+    let (rsp_size, rsp_code) = execute_command(create_primary_req.as_mut_slice(), &mut rsp, 0);
+
+    if rsp_size == 0 || rsp_code != TPM_RC_SUCCESS {
+        log::error!("Failed of tpm2_createprimary. code = 0x{:x?}\n", rsp_code);
+        return Err(VtpmError::TpmLibError);
+    }
+
+    let handle_data: &[u8] = &rsp[10..14];
+    let curr_handle = u32::from_be_bytes([
+        handle_data[0],
+        handle_data[1],
+        handle_data[2],
+        handle_data[3],
+    ]);
+
+    tpm2_evictcontrol(curr_handle, tpm2_ek_handle)
+}
+
 fn tpm2_evictcontrol(curr_handle: u32, perm_handle: u32) -> VtpmResult {
     let hdr: Tpm2CommandHeader = Tpm2CommandHeader::new(
         TPM_ST_SESSIONS,
@@ -244,8 +346,8 @@ fn tpm2_evictcontrol(curr_handle: u32, perm_handle: u32) -> VtpmResult {
     Ok(())
 }
 
-/// Get the TPM EKpub key
-pub fn tpm2_get_ek_pub() -> Vec<u8> {
+/// Get the TPM ECP384 EKpub key
+pub fn tpm2_get_ecp384_ekpub() -> Vec<u8> {
     // TPM2_CC_ReadPublic 0x00000173
     // TPM2_EK_ECC_SECP384R1_HANDLE is 0x81010016
     let cmd_req: &mut [u8] = &mut [
@@ -291,7 +393,48 @@ pub fn tpm2_get_ek_pub() -> Vec<u8> {
 
     // log::info!("public_key {:x} {:02x?}\n", out_public.len(), out_public);
 
-    out_public.to_vec()
+    out_public
+}
+
+/// Get the TPM RSA2048 EKpub key
+pub fn tpm2_get_rsa2048_ekpub() -> Vec<u8> {
+    // TPM2_CC_ReadPublic 0x00000173
+    // TPM2_EK_ECC_SECP384R1_HANDLE is 0x81010001
+    let cmd_req: &mut [u8] = &mut [
+        0x80, 0x01, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x01, 0x73, 0x81, 0x01, 0x00, 0x01,
+    ];
+    let mut rsp: [u8; VTPM_MAX_BUFFER_SIZE] = [0; VTPM_MAX_BUFFER_SIZE];
+    let (rsp_size, rsp_code) = execute_command(cmd_req, &mut rsp, 0);
+
+    if rsp_size == 0 || rsp_code != TPM_RC_SUCCESS {
+        log::error!("Failed of tpm2_readpublic. code = 0x{:x?}\n", rsp_code);
+        return Vec::new();
+    }
+
+    // Output parameters
+    let out_parms: &[u8] = &rsp[{ Tpm2CommandHeader::header_size() as usize }..];
+
+    const U16_SIZE: usize = core::mem::size_of::<u16>();
+
+    // TPM2B_PUBLIC.size field
+    let size: u16 = u16::from_be_bytes(out_parms[..U16_SIZE].try_into().unwrap());
+
+    // TPM2B_PUBLIC structure
+    let tpm2b_public: &[u8] = &out_parms[..{ size as usize + U16_SIZE }];
+    let tpm2b_public_len = tpm2b_public.len();
+
+    let unique_len: usize = 256;
+    if tpm2b_public_len < unique_len {
+        log::error!("Invalid unique of RSA2048\n");
+        return Vec::new();
+    }
+
+    let offset = tpm2b_public_len - unique_len;
+    let mut out_public: Vec<u8> = Vec::new();
+    // out_public.extend_from_slice(&0_u32.to_be_bytes());
+    out_public.extend_from_slice(&tpm2b_public[offset..]);
+
+    out_public
 }
 
 pub fn tpm2_write_cert_nvram(
@@ -462,14 +605,122 @@ fn tpm2_nv_write(nvindex: u32, data: &[u8], max_nv_buffer: u32) -> VtpmResult {
     Ok(())
 }
 
-fn get_tpm2_caps() -> Option<(u32, u32)> {
+fn get_tpm2_caps() -> Option<Tpm2Caps> {
     let tpm2_caps = tpm2_get_caps()?;
     let max_nv_index_size = *tpm2_caps.get(&TPM_PT_NV_INDEX_MAX)?;
     let max_nv_buffer_size = *tpm2_caps.get(&TPM_PT_NV_BUFFER_MAX)?;
 
     // log::info!("max_nv_index_size=0x{0:x?}, max_nv_buffer_size=0x{1:x?}\n", max_nv_index_size, max_nv_buffer_size);
 
-    Some((max_nv_index_size, max_nv_buffer_size))
+    let mut tpm2_caps = Tpm2Caps::default();
+    tpm2_caps.max_nv_buffer_size = max_nv_buffer_size;
+    tpm2_caps.max_nv_index_size = max_nv_index_size;
+
+    Some(tpm2_caps)
+}
+
+fn provision_ecp384_ekcert(tpm2_caps: &Tpm2Caps, key_pair: &EcdsaKeyPair) -> VtpmResult {
+    log::info!("provision ecp384 ek_cert.\n");
+
+    // Create ek_ec384 and get its ekpub
+    tpm2_create_ek_ec384()?;
+
+    let ekpub: Vec<u8> = tpm2_get_ecp384_ekpub();
+    if ekpub.is_empty() {
+        return Err(VtpmError::EkProvisionError);
+    }
+
+    let algorithm = AlgorithmIdentifier {
+        algorithm: ID_EC_PUBKEY_OID,
+        parameters: Some(Any::new(Tag::ObjectIdentifier, SECP384R1_OID.as_bytes()).unwrap()),
+    };
+
+    let ekcert = generate_ek_cert(ekpub.as_slice(), algorithm, &key_pair)
+        .map_err(|_| VtpmError::EkProvisionError)?;
+
+    // save ecp384_ekcert into NV
+    if ekcert.as_slice().len() > tpm2_caps.max_nv_index_size as usize {
+        log::error!(
+            "ek-cert size ({0:x?}) is too big to be in a single nv index({1:x?}).\n",
+            ekcert.as_slice().len(),
+            tpm2_caps.max_nv_index_size
+        );
+        return Err(VtpmError::EkProvisionError);
+    }
+
+    tpm2_write_cert_nvram(
+        TPM2_NV_INDEX_ECC_SECP384R1_HI_EKCERT,
+        ekcert.as_slice(),
+        tpm2_caps.max_nv_index_size as u16,
+        tpm2_caps.max_nv_buffer_size,
+    )
+    .map_err(|_| VtpmError::EkProvisionError)?;
+
+    Ok(())
+}
+
+// rfc3279#section-2.3.1 RSA Keys
+// The RSA public key is encoded using the ASN.1 type RSAPublicKey:
+//
+// RSAPublicKey ::= SEQUENCE {
+//     modulus            INTEGER,    -- n
+//     publicExponent     INTEGER  }  -- e
+//
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Sequence)]
+struct RsaPublicKeyDer<'a> {
+    pub modulus: UIntBytes<'a>,
+    pub exponents: UIntBytes<'a>,
+}
+
+fn provision_rsa2048_ekcert(tpm2_caps: &Tpm2Caps, key_pair: &EcdsaKeyPair) -> VtpmResult {
+    log::info!("provision rsa2048 ek_cert.\n");
+
+    // Create ek_rsa2048 and get its ekpub
+    tpm2_create_ek_rsa2048()?;
+
+    let ekpub: Vec<u8> = tpm2_get_rsa2048_ekpub();
+    if ekpub.is_empty() {
+        return Err(VtpmError::EkProvisionError);
+    }
+
+    let exp: [u8; 4] = [0; 4];
+    let mut formated_public_key: Vec<u8> = Vec::new();
+
+    let der = RsaPublicKeyDer {
+        modulus: UIntBytes::new(&ekpub).map_err(|_e| VtpmError::EkProvisionError)?,
+        exponents: UIntBytes::new(&exp).map_err(|_e| VtpmError::EkProvisionError)?,
+    };
+
+    let s = der.encode_to_vec(&mut formated_public_key).map_err(|_| VtpmError::EkProvisionError)?;
+    log::info!("formated pubkey: {0:?}, {1:02x?}\n", s, formated_public_key.as_slice());
+
+    let algorithm = AlgorithmIdentifier {
+        algorithm: ID_RSA_PUBKEY_OID,
+        parameters: Some(Any::NULL),
+    };
+
+    let ekcert = generate_ek_cert(formated_public_key.as_slice(), algorithm, &key_pair)
+        .map_err(|_| VtpmError::EkProvisionError)?;
+
+    // save ekcert into NV
+    if ekcert.as_slice().len() > tpm2_caps.max_nv_index_size as usize {
+        log::error!(
+            "ek-cert size ({0:x?}) is too big to be in a single nv index({1:x?}).\n",
+            ekcert.as_slice().len(),
+            tpm2_caps.max_nv_index_size
+        );
+        return Err(VtpmError::EkProvisionError);
+    }
+
+    tpm2_write_cert_nvram(
+        TPM2_NV_INDEX_RSA2048_EKCERT,
+        ekcert.as_slice(),
+        tpm2_caps.max_nv_index_size as u16,
+        tpm2_caps.max_nv_buffer_size,
+    )
+    .map_err(|_| VtpmError::EkProvisionError)?;
+
+    Ok(())
 }
 
 pub fn tpm2_provision_ek() -> VtpmResult {
@@ -488,18 +739,7 @@ pub fn tpm2_provision_ek() -> VtpmResult {
         if caps.is_none() {
             break;
         }
-        let (max_nv_index_size, max_nv_buffer_size) = caps.unwrap();
-
-        // then Create ek_ec384
-        if tpm2_create_ek_ec384().is_err() {
-            break;
-        }
-
-        // get the ek_pub
-        let ek_pub: Vec<u8> = tpm2_get_ek_pub();
-        if ek_pub.is_empty() {
-            break;
-        }
+        let caps = caps.unwrap();
 
         // get the ca_cert and its keypair (in pkcs8 format)
         let ca_cert = GLOBAL_TPM_DATA.lock().get_ca_cert();
@@ -521,40 +761,22 @@ pub fn tpm2_provision_ek() -> VtpmResult {
         }
         let key_pair = key_pair.unwrap();
 
-        // then generate ek-cert
-        let ek_cert = generate_ek_cert(ek_pub.as_slice(), &key_pair);
-        if ek_cert.is_err() {
-            break;
-        }
-        let ek_cert = ek_cert.unwrap();
-
-        // save ek-cert into NV
-        if ek_cert.as_slice().len() > max_nv_index_size as usize {
-            log::error!(
-                "ek-cert size ({0:x?}) is too big to be in a single nv index({1:x?}).\n",
-                ek_cert.as_slice().len(),
-                max_nv_index_size
-            );
+        // Create and provision ek_ec384
+        if provision_ecp384_ekcert(&caps, &key_pair).is_err() {
             break;
         }
 
-        if tpm2_write_cert_nvram(
-            TPM2_NV_INDEX_ECC_SECP384R1_HI_EKCERT,
-            ek_cert.as_slice(),
-            max_nv_index_size as u16,
-            max_nv_buffer_size,
-        )
-        .is_err()
-        {
+        // Create and provision ek_rsa2048
+        if provision_rsa2048_ekcert(&caps, &key_pair).is_err() {
             break;
         }
 
-        // save ca-cert into NV
+        // provision ca-cert
         if tpm2_write_cert_nvram(
             TPM2_NV_INDEX_VTPM_CA_CERT_CHAIN,
             ca_cert.as_slice(),
-            max_nv_index_size as u16,
-            max_nv_buffer_size,
+            caps.max_nv_index_size as u16,
+            caps.max_nv_buffer_size,
         )
         .is_err()
         {

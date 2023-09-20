@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 attestation = { path = "../attestation", default-features = false }
+der = {version = "0.5.1", features = ["oid", "alloc", "derive"]}
 eventlog = { path = "../eventlog" }
 global = { path = "../global" }
 crypto = { path = "../crypto" }

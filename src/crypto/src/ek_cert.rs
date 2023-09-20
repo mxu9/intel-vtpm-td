@@ -11,7 +11,7 @@ use ring::signature::{EcdsaKeyPair, KeyPair};
 
 use crate::resolve::{
     AUTHORITY_KEY_IDENTIFIER, BASIC_CONSTRAINTS, EXTENDED_KEY_USAGE, EXTNID_VTPMTD_EVENT_LOG,
-    EXTNID_VTPMTD_QUOTE, KEY_USAGE, VTPMTD_CA_EXTENDED_KEY_USAGE,
+    EXTNID_VTPMTD_QUOTE, KEY_USAGE, VTPMTD_CA_EXTENDED_KEY_USAGE, ID_EC_SIG_OID,
 };
 use crate::x509::{self, DistinguishedName, Extension};
 use crate::{
@@ -42,6 +42,11 @@ pub fn generate_ca_cert(
         parameters: Some(Any::new(Tag::ObjectIdentifier, SECP384R1_OID.as_bytes()).unwrap()),
     };
 
+    let sig_alg = AlgorithmIdentifier {
+        algorithm: ID_EC_SIG_OID,
+        parameters: None,
+    };
+
     // extended key usage
     let eku: alloc::vec::Vec<ObjectIdentifier> = vec![VTPMTD_CA_EXTENDED_KEY_USAGE];
     let eku = eku
@@ -55,7 +60,7 @@ pub fn generate_ca_cert(
         .map_err(|e| ResolveError::GenerateCertificate(X509Error::DerEncoding(e)))?;
 
     let x509_certificate =
-        x509::CertificateBuilder::new(algorithm, algorithm, ecdsa_keypair.public_key().as_ref())?
+        x509::CertificateBuilder::new(sig_alg, algorithm, ecdsa_keypair.public_key().as_ref())?
             // 1970-01-01T00:00:00Z
             .set_not_before(core::time::Duration::new(0, 0))?
             // 9999-12-31T23:59:59Z
@@ -90,6 +95,7 @@ pub fn generate_ca_cert(
 
 pub fn generate_ek_cert(
     ek_pub: &[u8],
+    ek_pub_algorithm: AlgorithmIdentifier,
     ecdsa_keypair: &EcdsaKeyPair,
 ) -> Result<alloc::vec::Vec<u8>, ResolveError> {
     let mut sig_buf: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
@@ -100,10 +106,15 @@ pub fn generate_ek_cert(
     };
 
     // Generate x.509 certificate
-    let algorithm = AlgorithmIdentifier {
-        algorithm: ID_EC_PUBKEY_OID,
-        parameters: Some(Any::new(Tag::ObjectIdentifier, SECP384R1_OID.as_bytes()).unwrap()),
+    let sig_alg = AlgorithmIdentifier {
+        algorithm: ID_EC_SIG_OID,
+        parameters: None,
     };
+
+    // let cert_signature = AlgorithmIdentifier {
+    //     algorithm: ID_EC_PUBKEY_OID,
+    //     parameters: Some(Any::new(Tag::ObjectIdentifier, SECP384R1_OID.as_bytes()).unwrap()),
+    // };
 
     let basic_constrains: alloc::vec::Vec<bool> = vec![false];
     let basic_constrains = basic_constrains
@@ -143,7 +154,7 @@ pub fn generate_ek_cert(
         .to_vec()
         .map_err(|e| ResolveError::GenerateCertificate(X509Error::DerEncoding(e)))?;
 
-    let x509_certificate = x509::CertificateBuilder::new(algorithm, algorithm, ek_pub)?
+    let x509_certificate = x509::CertificateBuilder::new(sig_alg, ek_pub_algorithm, ek_pub)?
         // 1970-01-01T00:00:00Z
         .set_not_before(core::time::Duration::new(0, 0))?
         // 9999-12-31T23:59:59Z

@@ -54,6 +54,9 @@ pub const ID_EC_PUBKEY_OID: ObjectIdentifier = ObjectIdentifier::new("1.2.840.10
 // }
 pub const SECP384R1_OID: ObjectIdentifier = ObjectIdentifier::new("1.3.132.0.34");
 
+pub const ID_RSA_PUBKEY_OID: ObjectIdentifier = ObjectIdentifier::new("1.2.840.113549.1.1.1");
+pub const ID_EC_SIG_OID: ObjectIdentifier = ObjectIdentifier::new("1.2.840.10045.4.3.3");
+
 #[derive(Debug)]
 pub enum ResolveError {
     GenerateKey,
